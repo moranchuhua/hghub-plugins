@@ -5,7 +5,7 @@
     {
       "id": "jable.tv",
       "name": "Jable",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "description": "Jable 视频源（Cloudflare 站点，需要网页视图验证）",
       "url": "jable.tv.js"
     }

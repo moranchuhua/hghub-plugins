@@ -10,7 +10,7 @@
 export const meta = {
   id: 'jable.tv',
   name: 'Jable',
-  version: '1.0.5',
+  version: '1.0.6',
   protocol: 1,
   description: 'Jable 视频源。首次使用需在网页视图中完成站点安全验证（Cloudflare）。',
   kind: 'source',
@@ -30,6 +30,16 @@ const FIXED_CATEGORIES = [
   { id: 'latest', label: '最新更新' },
   { id: 'new', label: '新片' },
   { id: 'hot', label: '热门' },
+];
+
+// 站点排序标签，取自列表页/搜索页 sorting-nav 的 data-parameters="sort_by:…"。
+// value 为空表示站点默认排序（搜索页的“最高相关”）。
+const SORTS = [
+  { id: 'relevance', label: '最高相关', value: '' },
+  { id: 'recent-best', label: '近期最佳', value: 'post_date_and_popularity' },
+  { id: 'newest', label: '最近更新', value: 'post_date' },
+  { id: 'views', label: '最多观看', value: 'video_viewed' },
+  { id: 'favorites', label: '最高收藏', value: 'most_favourited' },
 ];
 
 export default function (hg) {
@@ -221,21 +231,32 @@ export default function (hg) {
   }
 
   // 页码：用于判断“有没有下一页”，不影响取页地址本身。
+  // 查询串里可能带 sort_by，比较页码前先把它切掉。
   function pageOf(path) {
-    const m = clean(path).match(/[?&]page=(\d+)/) || clean(path).match(/(?:\/|=)(\d+)\/?$/);
+    const p = clean(path);
+    const base = p.split('?')[0];
+    const m = base.match(/\/(\d+)\/$/) || p.match(/[?&]page=(\d+)/);
     return m ? Math.max(1, Number(m[1])) : 1;
   }
 
   // 站点第 2 页起的搜索链接会丢掉查询段（/search/3/），不能照抄；
   // 这里按当前地址推导下一页，是否还有下一页仍由站点自己的分页块决定。
+  // 查询串（例如 sort_by）必须原样带到下一页。
   function withPage(path, page) {
     const p = clean(path);
-    if (/[?&]q=/.test(p) && !/\/\d+\/$/.test(p)) {
-      const m = p.match(/[?&]q=([^&]*)/);
-      return '/search/' + (m ? m[1] : '') + '/' + page + '/';
+    const cut = p.indexOf('?');
+    const base = cut >= 0 ? p.slice(0, cut) : p;
+    const query = cut >= 0 ? p.slice(cut) : '';
+    let next;
+    if (/[?&]q=/.test(query) && !/\/\d+\/$/.test(base)) {
+      const m = query.match(/[?&]q=([^&]*)/);
+      next = '/search/' + (m ? m[1] : '') + '/' + page + '/';
+    } else if (/\/\d+\/$/.test(base)) {
+      next = base.replace(/\/(\d+)\/$/, '/' + page + '/');
+    } else {
+      next = base.replace(/\/*$/, '/') + page + '/';
     }
-    if (/\/\d+\/$/.test(p)) return p.replace(/\/(\d+)\/$/, '/' + page + '/');
-    return p.replace(/\/*$/, '/') + page + '/';
+    return next + query;
   }
 
   function nextCursor(doc, page, currentPath) {
@@ -356,6 +377,21 @@ export default function (hg) {
     }
     if (!base) throw fail('INVALID_ARGUMENT', '未知的分类：' + categoryId);
     return page > 1 ? base + page + '/' : base;
+  }
+
+  // 排序 id → 站点的 sort_by 值；未知 id 一律回退默认排序。
+  function sortValueOf(sortId) {
+    const key = clean(sortId);
+    for (const s of SORTS) if (s.id === key) return s.value;
+    return '';
+  }
+
+  // sort_by 走查询串，翻页路径里的查询串由 withPage 原样带过去。
+  function withSort(path, sortId) {
+    const value = sortValueOf(sortId);
+    if (!value) return path;
+    const p = clean(path);
+    return p + (p.indexOf('?') >= 0 ? '&' : '?') + 'sort_by=' + encodeURIComponent(value);
   }
 
   // 首页分区的 id 取自“更多”链接的路径（latest-updates、categories/xxx…），
@@ -486,22 +522,42 @@ export default function (hg) {
         return items;
       },
 
-      async list({ categoryId, cursor }, ctx) {
+      async getFilters(_params, ctx) {
+        // 列表页的排序标签（站点上 4 个，搜索页多一个“最高相关”）。
+        return {
+          sorts: SORTS.filter((s) => s.value).map((s) => ({ id: s.id, label: s.label })),
+        };
+      },
+
+      async list({ categoryId, cursor, sort }, ctx) {
         const next = cursorPath(cursor);
         const page = next ? pageOf(next) : legacyPage(cursor) || 1;
-        const target = next || listingPath(categoryId, page);
+        const target = next || withSort(listingPath(categoryId, page), sort);
         const doc = await loadHtml(target, ctx, 60);
         return paginate(doc, page, cardsOf(doc, 100), target);
       },
     },
 
     search: {
-      async search({ query, cursor }, ctx) {
+      // search 的参数里没有 sort 字段，排序用筛选器表达（单选）。
+      async getFilters() {
+        return [
+          {
+            id: 'sort',
+            label: '排序',
+            multiple: false,
+            options: SORTS.map((s) => ({ id: s.id, label: s.label })),
+          },
+        ];
+      },
+
+      async search({ query, cursor, filters }, ctx) {
         const q = clean(query);
         const next = cursorPath(cursor);
         if (!next && !q) return { items: [], next: null };
         const page = next ? pageOf(next) : legacyPage(cursor) || 1;
-        const target = next || '/search/?q=' + encodeURIComponent(q) + (page > 1 ? '&page=' + page : '');
+        const sortId = filters && Array.isArray(filters.sort) ? filters.sort[0] : '';
+        const target = next || withSort('/search/?q=' + encodeURIComponent(q) + (page > 1 ? '&page=' + page : ''), sortId);
         const doc = await loadHtml(target, ctx, 60);
         const items = cardsOf(doc, 100);
         return { items, next: nextCursor(doc, page, target) };
