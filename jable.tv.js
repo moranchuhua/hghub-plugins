@@ -10,7 +10,7 @@
 export const meta = {
   id: 'jable.tv',
   name: 'Jable',
-  version: '1.0.4',
+  version: '1.0.5',
   protocol: 1,
   description: 'Jable 视频源。首次使用需在网页视图中完成站点安全验证（Cloudflare）。',
   kind: 'source',
@@ -207,27 +207,58 @@ export default function (hg) {
     return out;
   }
 
-  function pageNumbers(doc) {
-    const set = new Set();
+  // 分页游标直接保存站点自己给出的“下一页”地址（路径 + 查询串）。
+  // 不猜分页参数名，宿主重载插件后游标依然可用。
+  function pageHrefs(doc) {
+    const map = new Map();
     for (const a of doc.select('ul.pagination a.page-link')) {
       const href = attrOf(a, 'href');
+      if (!href) continue;
       const m = href.match(/(?:\/|=)(\d+)\/?$/);
-      if (m) set.add(Number(m[1]));
+      if (m) map.set(Number(m[1]), href);
     }
-    return set;
+    return map;
   }
 
-  function cursorPage(cursor) {
+  // 页码：用于判断“有没有下一页”，不影响取页地址本身。
+  function pageOf(path) {
+    const m = clean(path).match(/[?&]page=(\d+)/) || clean(path).match(/(?:\/|=)(\d+)\/?$/);
+    return m ? Math.max(1, Number(m[1])) : 1;
+  }
+
+  // 站点第 2 页起的搜索链接会丢掉查询段（/search/3/），不能照抄；
+  // 这里按当前地址推导下一页，是否还有下一页仍由站点自己的分页块决定。
+  function withPage(path, page) {
+    const p = clean(path);
+    if (/[?&]q=/.test(p) && !/\/\d+\/$/.test(p)) {
+      const m = p.match(/[?&]q=([^&]*)/);
+      return '/search/' + (m ? m[1] : '') + '/' + page + '/';
+    }
+    if (/\/\d+\/$/.test(p)) return p.replace(/\/(\d+)\/$/, '/' + page + '/');
+    return p.replace(/\/*$/, '/') + page + '/';
+  }
+
+  function nextCursor(doc, page, currentPath) {
+    if (!pageHrefs(doc).has(page + 1)) return null;
+    return withPage(currentPath, page + 1);
+  }
+
+  // 只接受本站的路径游标，避免被拼成跨站地址。
+  function cursorPath(cursor) {
+    const c = clean(cursor);
+    if (!c || !c.startsWith('/') || c.startsWith('//')) return '';
+    if (/[\\\s\x00-\x1f]/.test(c)) return '';
+    return c;
+  }
+
+  // 兼容早期版本发出的纯数字游标。
+  function legacyPage(cursor) {
     const n = Number(cursor);
-    return Number.isInteger(n) && n >= 1 && n <= 5000 ? n : 1;
+    return Number.isInteger(n) && n >= 1 && n <= 5000 ? n : 0;
   }
 
-  function nextCursor(doc, page) {
-    return pageNumbers(doc).has(page + 1) ? String(page + 1) : null;
-  }
-
-  function paginate(doc, page, items) {
-    return { items, next: nextCursor(doc, page) };
+  function paginate(doc, page, items, currentPath) {
+    return { items, next: nextCursor(doc, page, currentPath) };
   }
 
   // ---- 详情 / 播放 --------------------------------------------------------
@@ -426,10 +457,11 @@ export default function (hg) {
 
       async listSection({ sectionId, cursor }, ctx) {
         const raw = clean(sectionId).replace(/^\/|\/$/g, '');
-        const page = cursorPage(cursor);
-        const categoryId = sectionToCategory(raw);
-        const doc = await loadHtml(listingPath(categoryId, page), ctx, 60);
-        return paginate(doc, page, cardsOf(doc, 100));
+        const next = cursorPath(cursor);
+        const page = next ? pageOf(next) : legacyPage(cursor) || 1;
+        const target = next || listingPath(sectionToCategory(raw), page);
+        const doc = await loadHtml(target, ctx, 60);
+        return paginate(doc, page, cardsOf(doc, 100), target);
       },
     },
 
@@ -455,21 +487,24 @@ export default function (hg) {
       },
 
       async list({ categoryId, cursor }, ctx) {
-        const page = cursorPage(cursor);
-        const path = listingPath(categoryId, page);
-        const doc = await loadHtml(path, ctx, 60);
-        return paginate(doc, page, cardsOf(doc, 100));
+        const next = cursorPath(cursor);
+        const page = next ? pageOf(next) : legacyPage(cursor) || 1;
+        const target = next || listingPath(categoryId, page);
+        const doc = await loadHtml(target, ctx, 60);
+        return paginate(doc, page, cardsOf(doc, 100), target);
       },
     },
 
     search: {
       async search({ query, cursor }, ctx) {
         const q = clean(query);
-        if (!q) return { items: [], next: null };
-        const page = cursorPage(cursor);
-        const doc = await loadHtml('/search/?q=' + encodeURIComponent(q) + (page > 1 ? '&page=' + page : ''), ctx, 60);
+        const next = cursorPath(cursor);
+        if (!next && !q) return { items: [], next: null };
+        const page = next ? pageOf(next) : legacyPage(cursor) || 1;
+        const target = next || '/search/?q=' + encodeURIComponent(q) + (page > 1 ? '&page=' + page : '');
+        const doc = await loadHtml(target, ctx, 60);
         const items = cardsOf(doc, 100);
-        return { items, next: nextCursor(doc, page) };
+        return { items, next: nextCursor(doc, page, target) };
       },
     },
 
