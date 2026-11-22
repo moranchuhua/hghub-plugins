@@ -1,0 +1,13 @@
+{
+  "name": "Jable 插件",
+  "description": "jable.tv 单文件数据源插件；首次使用需在网页视图中完成站点安全验证。",
+  "plugins": [
+    {
+      "id": "jable.tv",
+      "name": "Jable",
+      "version": "1.0.4",
+      "description": "Jable 视频源（Cloudflare 站点，需要网页视图验证）",
+      "url": "jable.tv.js"
+    }
+  ]
+}
